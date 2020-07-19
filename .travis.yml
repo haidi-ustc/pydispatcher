@@ -1,0 +1,12 @@
+language: python
+python:
+  - "3.6"
+  - "3.7"
+before_install:
+  - pip install --upgrade pip coverage codecov
+install:
+  - pip install .
+script:
+  - coverage run --source=./pydispatcher -m unittest -v && coverage report
+after_success:
+  - codecov
