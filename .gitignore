@@ -40,3 +40,5 @@ dbconfig.json
 .vscode/*
 tests
 mytest
+*/_version.py
+*/_date.py

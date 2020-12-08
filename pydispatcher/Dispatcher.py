@@ -12,6 +12,8 @@ from pydispatcher.AWS import AWS
 from pydispatcher.JobStatus import JobStatus
 from pydispatcher import dlog
 from hashlib import sha1
+from monty.json import  MSONable
+from monty.serialization import loadfn,dumpfn
 
 def _split_tasks(tasks,
                  group_size):
@@ -28,41 +30,56 @@ def _split_tasks(tasks,
     return chunks
 
     
-class Dispatcher(object):
+class Dispatcher(MSONable):
     def __init__ (self,
                   remote_profile,
                   context_type = 'local',
                   batch_type = 'slurm', 
                   job_record = 'jr.json'):
-        self.remote_profile = remote_profile
 
-        if context_type == 'local':
-            self.session = LocalSession(remote_profile)
+        self.remote_profile = remote_profile
+        self.context_type=context_type
+        self.batch_type=batch_type
+        self.job_record = job_record
+        self.set_context()
+
+    def set_context(self):
+        if self.context_type == 'local':
+            self.session = LocalSession(self.remote_profile)
             self.context = LocalContext
             self.uuid_names = True
-        elif context_type == 'lazy-local':
+            self._context_type="session: LocalSession\ncontext: LocalContext"
+        elif self.context_type == 'lazy-local':
             self.session = None
             self.context = LazyLocalContext
             self.uuid_names = True
-        elif context_type == 'ssh':
-            self.session = SSHSession(remote_profile)
+            self._context_type="session: None\ncontext: LazyLocalContext"
+        elif self.context_type == 'ssh':
+            self.session = SSHSession(self.remote_profile)
             self.context = SSHContext
             self.uuid_names = True
+            self._context_type="session: SSHSession\ncontext: SSHContext"
         else :
             raise RuntimeError('unknown context')
-        if batch_type == 'slurm':
+
+        if self.batch_type == 'slurm':
             self.batch = Slurm            
-        elif batch_type == 'lsf':
+        elif self.batch_type == 'lsf':
             self.batch = LSF
-        elif batch_type == 'pbs':
+        elif self.batch_type == 'pbs':
             self.batch = PBS
-        elif batch_type == 'shell':
+        elif self.batch_type == 'shell':
             self.batch = Shell
         elif batch_type == 'aws':
             self.batch = AWS
         else :
             raise RuntimeError('unknown batch ' + batch_type)
-        self.jrname = job_record
+
+    def __str__(self):
+        return "batch  : "+self.batch_type.upper()+'\n'+self._context_type
+   
+    def __repr__(self):
+        return self.__str__()
 
     def run_jobs(self,
                  resources,
@@ -89,7 +106,7 @@ class Dispatcher(object):
                                        outlog,
                                        errlog)
         while not self.all_finished(job_handler, mark_failure) :
-            time.sleep(60)
+            time.sleep(10)
         # delete path map file when job finish
         # _pmap.delete()
 
@@ -114,7 +131,8 @@ class Dispatcher(object):
         task_chunks = _split_tasks(tasks, group_size)    
         task_chunks_str = ['+'.join(ii) for ii in task_chunks]
         task_hashes = [sha1(ii.encode('utf-8')).hexdigest() for ii in task_chunks_str]
-        job_record = JobRecord(work_path, task_chunks, fname = self.jrname)
+        job_record = JobRecord(work_path, task_chunks, fname = self.job_record)
+        dumpfn(job_record,'job.json',indent=4)
         nchunks = len(task_chunks)
         
         job_list = []
@@ -187,7 +205,8 @@ class Dispatcher(object):
     def all_finished(self, 
                      job_handler, 
                      mark_failure,
-                     clean=True):
+                     clean=False,
+                     retry_max=1):
         task_chunks = job_handler['task_chunks']
         task_chunks_str = ['+'.join(ii) for ii in task_chunks]
         task_hashes = [sha1(ii.encode('utf-8')).hexdigest() for ii in task_chunks_str]
@@ -211,8 +230,8 @@ class Dispatcher(object):
                 dlog.debug('checked job %s' % job_uuid)
                 if status == JobStatus.terminated :
                     job_record.increase_nfail(cur_hash)
-                    if job_record.check_nfail(cur_hash) > 3:
-                        raise RuntimeError('Job %s failed for more than 3 times' % job_uuid)
+                    if job_record.check_nfail(cur_hash) > retry_max:
+                        raise RuntimeError('Job %s failed for more than '+str(retry_max)+' times' % job_uuid)
                     dlog.info('job %s terminated, submit again'% job_uuid)
                     dlog.debug('try %s times for %s'% (job_record.check_nfail(cur_hash), job_uuid))
                     rjob['batch'].submit(task_chunks[idx], command, res = resources, outlog=outlog, errlog=errlog,restart=True)
@@ -231,11 +250,12 @@ class Dispatcher(object):
         return job_record.check_all_finished()
 
 
-class JobRecord(object):
+class JobRecord(MSONable):
     def __init__ (self, path, task_chunks, fname = 'job_record.json', ip=None):
         self.path = os.path.abspath(path)
         self.fname = os.path.join(self.path, fname)
         self.task_chunks = task_chunks
+        self.ip=ip
         if not os.path.exists(self.fname):
             self._new_record()
         else :
